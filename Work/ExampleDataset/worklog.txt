@@ -1,0 +1,2 @@
+[1/2] human_dog_walking_1 = [v]
+[2/2] human_dog_walking_2 = [n]

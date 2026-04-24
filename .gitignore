@@ -1,0 +1,29 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build outputs
+AutoLabeler.exe
+Code/build/
+dist/
+build/
+
+# Model and runtime artifacts
+Data/ultralytics/
+Data/models/
+*.pt
+*.onnx
+
+# Workspace data
+Work/*
+!Work/ExampleDataset/
+Work/ExampleDataset/Temp/
+
+# Training and run outputs
+runs/
+weights/
+Temp/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

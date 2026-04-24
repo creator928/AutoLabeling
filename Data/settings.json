@@ -1,0 +1,38 @@
+{
+  "theme_mode": "dark",
+  "rectangle_input_mode": "drag",
+  "selected_model": "yolo11n.pt",
+  "shortcuts": {
+    "draw_box": "W",
+    "mask_area": "X",
+    "edit_box": "E",
+    "cancel_mode": "Q",
+    "prev_image": "A",
+    "next_image": "D",
+    "reset_view": "S",
+    "delete_last_box": "R",
+    "toggle_theme": "T",
+    "open_settings": "Ctrl+,"
+  },
+  "class_shortcuts": {
+    "0": "`",
+    "1": "1",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+  },
+  "runtime_options": {
+    "use_gpu": "true",
+    "dataset_size": "50",
+    "epochs": "30",
+    "image_size": "640",
+    "batch_size": "8",
+    "project_name": "AutoLabelerTrain",
+    "auto_label_conf": "0.01"
+  }
+}
