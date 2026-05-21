@@ -169,7 +169,11 @@ class ImageCanvas(QWidget):
             return
 
         if self.current_mode == "edit":
-            self._begin_edit(point)
+            if not self._begin_edit(point) and self.zoom_factor > 1.0:
+                # 편집 대상이 없는 빈 영역에서는 확대된 화면을 손 도구처럼 이동할 수 있게 합니다.
+                self.pan_anchor = point
+                self.pan_start_offset = QPointF(self.pan_offset)
+                self._update_cursor(True)
             return
 
         if self.current_mode not in {"draw", "mask"}:
@@ -207,6 +211,11 @@ class ImageCanvas(QWidget):
             return
 
         if self.current_mode == "edit":
+            if self.pan_anchor is not None and point is not None:
+                delta = point - self.pan_anchor
+                self.pan_offset = QPointF(self.pan_start_offset.x() + delta.x(), self.pan_start_offset.y() + delta.y())
+                self.update()
+                return
             self._update_hover_edit_target(point)
             self._update_edit(point)
             return
@@ -230,6 +239,10 @@ class ImageCanvas(QWidget):
             return
 
         if self.current_mode == "edit":
+            if self.pan_anchor is not None:
+                self.pan_anchor = None
+                self._update_cursor()
+                return
             self._finish_edit()
             return
 
@@ -408,11 +421,11 @@ class ImageCanvas(QWidget):
             "br": QRectF(rect.right() - half, rect.bottom() - half, size, size),
         }
 
-    def _begin_edit(self, point: QPoint) -> None:
+    def _begin_edit(self, point: QPoint) -> bool:
         """편집 모드에서 이동 또는 리사이즈할 대상을 선택합니다."""
         self._update_hover_edit_target(point)
         if self.hover_edit_index is None:
-            return
+            return False
         rect = self._normalized_to_widget_rect(
             self.labels[self.hover_edit_index].x_center,
             self.labels[self.hover_edit_index].y_center,
@@ -426,6 +439,7 @@ class ImageCanvas(QWidget):
         if self.edit_mode_kind == "move":
             self.start_point = QPoint(point)
         self.update()
+        return True
 
     def _update_edit(self, point: QPoint) -> None:
         """편집 중인 박스를 현재 포인터 위치에 맞춰 갱신합니다."""

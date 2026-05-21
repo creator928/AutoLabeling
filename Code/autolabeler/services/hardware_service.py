@@ -12,6 +12,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .process_service import build_clean_python_env, clean_windows_dll_search_path, hidden_subprocess_kwargs
+
 
 @dataclass
 class HardwareStatus:
@@ -26,12 +28,39 @@ class HardwareStatus:
 
 def resolve_python_command() -> list[str]:
     """외부 학습 실행에 사용할 Python 명령을 결정합니다."""
+    candidates: list[list[str]] = []
+    configured_python = os.environ.get("AUTOLABELER_PYTHON_EXE", "").strip()
+    if configured_python and Path(configured_python).exists():
+        candidates.append([configured_python])
     if shutil.which("py"):
-        return ["py", "-3.10"]
+        candidates.extend((["py", "-3.10"], ["py", "-3"]))
     if shutil.which("python"):
-        return ["python"]
+        candidates.append(["python"])
     if Path(sys.executable).name.lower().startswith("python"):
-        return [sys.executable]
+        candidates.append([sys.executable])
+
+    probe_script = (
+        "import socket\n"
+        "import importlib.metadata\n"
+        "import torch\n"
+        "import ultralytics\n"
+        "import cv2\n"
+    )
+    for candidate in candidates:
+        try:
+            with clean_windows_dll_search_path():
+                completed = subprocess.run(
+                    [*candidate, "-c", probe_script],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    env=build_clean_python_env(),
+                    **hidden_subprocess_kwargs(),
+                )
+            if completed.returncode == 0:
+                return candidate
+        except Exception:
+            continue
     return []
 
 
@@ -49,6 +78,7 @@ def detect_hardware() -> HardwareStatus:
             text=True,
             check=True,
             encoding="utf-8",
+            **hidden_subprocess_kwargs(),
         )
         first_line = next((line.strip() for line in completed.stdout.splitlines() if line.strip()), "")
         if first_line:
@@ -72,13 +102,16 @@ def detect_hardware() -> HardwareStatus:
         " print(json.dumps({'gpu': False, 'gpu_name': ''}, ensure_ascii=False))\n"
     )
     try:
-        completed = subprocess.run(
-            [*python_command, "-c", script],
-            capture_output=True,
-            text=True,
-            check=True,
-            encoding="utf-8",
-        )
+        with clean_windows_dll_search_path():
+            completed = subprocess.run(
+                [*python_command, "-c", script],
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding="utf-8",
+                env=build_clean_python_env(),
+                **hidden_subprocess_kwargs(),
+            )
         payload = json.loads(completed.stdout.strip())
         cuda_runtime_available = bool(payload.get("gpu", False))
         if not gpu_available and bool(payload.get("gpu", False)):

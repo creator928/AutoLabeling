@@ -18,13 +18,21 @@ def get_app_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def get_runtime_code_dir(root_dir: Path) -> Path:
+    """외부 Python으로 실행할 러너 스크립트 위치를 반환합니다."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller onefile은 add-data 파일을 임시 해제 폴더에 풀어둡니다.
+        return Path(getattr(sys, "_MEIPASS", root_dir)).resolve()
+    return root_dir / "Code"
+
+
 def build_paths() -> AppPaths:
     """프로젝트 고정 디렉토리 구조를 경로 객체로 구성합니다."""
     root_dir = get_app_root()
     return AppPaths(
         root_dir=root_dir,
         document_dir=root_dir / "Document",
-        code_dir=root_dir / "Code",
+        code_dir=get_runtime_code_dir(root_dir),
         data_dir=root_dir / "Data",
         work_dir=root_dir / "Work",
         model_dir=root_dir / "Data" / "models",
@@ -49,7 +57,6 @@ def ensure_app_directories() -> AppPaths:
     paths = build_paths()
     for directory in (
         paths.document_dir,
-        paths.code_dir,
         paths.data_dir,
         paths.work_dir,
         paths.model_dir,

@@ -28,6 +28,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..services.process_service import build_clean_python_env, clean_windows_dll_search_path, hidden_subprocess_kwargs
+
 from ..constants import CLASS_COLORS
 from ..models import AppConfig, ModelOption
 
@@ -243,31 +245,31 @@ class ResultValidationDialog(QDialog):
         """이미지별 추론 결과를 캐시해 슬라이더 이동 시 재추론을 줄입니다."""
         if index not in self._result_cache:
             try:
-                process_env = os.environ.copy()
-                process_env["PYTHONIOENCODING"] = "utf-8"
-                process_env["PYTHONUTF8"] = "1"
-                completed = subprocess.run(
-                    [
-                        *self._python_command,
-                        self._runner_script_path,
-                        "--model",
-                        self._model_path,
-                        "--image",
-                        self._image_paths[index],
-                        "--imgsz",
-                        "640",
-                        "--conf",
-                        str(self._conf_threshold),
-                        "--device",
-                        self._device_text,
-                        "--ultralytics-dir",
-                        self._ultralytics_dir,
-                    ],
-                    capture_output=True,
-                    text=False,
-                    env=process_env,
-                    check=False,
-                )
+                process_env = build_clean_python_env()
+                with clean_windows_dll_search_path():
+                    completed = subprocess.run(
+                        [
+                            *self._python_command,
+                            self._runner_script_path,
+                            "--model",
+                            self._model_path,
+                            "--image",
+                            self._image_paths[index],
+                            "--imgsz",
+                            "640",
+                            "--conf",
+                            str(self._conf_threshold),
+                            "--device",
+                            self._device_text,
+                            "--ultralytics-dir",
+                            self._ultralytics_dir,
+                        ],
+                        capture_output=True,
+                        text=False,
+                        env=process_env,
+                        check=False,
+                        **hidden_subprocess_kwargs(),
+                    )
                 stdout_text = ""
                 for encoding in ("utf-8", locale.getpreferredencoding(False), "cp949"):
                     try:

@@ -11,6 +11,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from .process_service import build_clean_python_env, clean_windows_dll_search_path, hidden_subprocess_kwargs
+
 
 @dataclass
 class AutoLabelRequest:
@@ -81,17 +83,17 @@ class AutoLabelWorker(QObject):
                 str(self.request.worklog_path),
             ]
             self.status_changed.emit("오토 라벨 실행 준비 완료")
-            process_env = os.environ.copy()
             # 자식 Python 출력 인코딩을 UTF-8로 고정해 한글 로그가 깨지지 않도록 합니다.
-            process_env["PYTHONIOENCODING"] = "utf-8"
-            process_env["PYTHONUTF8"] = "1"
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=False,
-                env=process_env,
-            )
+            process_env = build_clean_python_env()
+            with clean_windows_dll_search_path():
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=False,
+                    env=process_env,
+                    **hidden_subprocess_kwargs(),
+                )
 
             if process.stdout is None:
                 raise RuntimeError("오토 라벨 로그를 읽을 수 없습니다.")

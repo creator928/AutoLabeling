@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from .process_service import build_clean_python_env, clean_windows_dll_search_path, hidden_subprocess_kwargs
 from .training_service import recreate_temp_dataset
 
 
@@ -86,17 +87,17 @@ class TrainingWorker(QObject):
                 str(self.request.ultralytics_dir),
             ]
             self.status_changed.emit("Temp 데이터셋 생성 완료")
-            process_env = os.environ.copy()
             # 자식 Python 표준 입출력을 UTF-8로 유도하되, 부모 쪽에서는 추가 복구 디코딩도 수행합니다.
-            process_env["PYTHONIOENCODING"] = "utf-8"
-            process_env["PYTHONUTF8"] = "1"
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=False,
-                env=process_env,
-            )
+            process_env = build_clean_python_env()
+            with clean_windows_dll_search_path():
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=False,
+                    env=process_env,
+                    **hidden_subprocess_kwargs(),
+                )
 
             if process.stdout is None:
                 raise RuntimeError("학습 로그를 읽을 수 없습니다.")
