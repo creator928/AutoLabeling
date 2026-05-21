@@ -99,10 +99,12 @@ def hidden_subprocess_kwargs() -> dict[str, object]:
     """Windows GUI 앱에서 자식 프로세스 콘솔 창이 뜨지 않도록 옵션을 반환합니다."""
     if os.name != "nt":
         return {}
+    import subprocess
+
     startup_info = subprocess_startup_info()
     return {
         "startupinfo": startup_info,
-        "creationflags": getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0),
+        "creationflags": subprocess.CREATE_NO_WINDOW,
     }
 
 

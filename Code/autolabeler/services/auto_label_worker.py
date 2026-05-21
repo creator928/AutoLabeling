@@ -14,7 +14,6 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from .process_service import (
     build_clean_python_env,
     clean_windows_dll_search_path,
-    external_python_cwd,
     hidden_subprocess_kwargs,
 )
 
@@ -97,7 +96,7 @@ class AutoLabelWorker(QObject):
                     stderr=subprocess.STDOUT,
                     text=False,
                     env=process_env,
-                    cwd=external_python_cwd(self.request.python_command),
+                    cwd=str(manifest_path.parent),
                     **hidden_subprocess_kwargs(),
                 )
 
