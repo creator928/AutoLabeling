@@ -73,6 +73,21 @@ class ImageCanvas(QWidget):
         self._clear_edit_state()
         self.update()
 
+    def clear_image(self) -> None:
+        """현재 표시 중인 이미지와 라벨을 비웁니다."""
+        self.image_path = None
+        self.image = QImage()
+        self.labels = []
+        self.hover_point = None
+        self.start_point = None
+        self.preview_end = None
+        self.first_click_point = None
+        self.zoom_factor = 1.0
+        self.pan_offset = QPointF(0.0, 0.0)
+        self.pan_anchor = None
+        self._clear_edit_state()
+        self.update()
+
     def set_mode(self, mode: str) -> None:
         """현재 모드를 손, 그리기, 마스킹, 편집 중 하나로 변경합니다."""
         self.current_mode = mode

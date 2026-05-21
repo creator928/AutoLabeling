@@ -43,6 +43,7 @@ from ..services.training_worker import TrainingRequest, TrainingWorker
 from ..services.worklog_service import (
     WorkStatus,
     load_worklog_statuses,
+    save_worklog_statuses,
     set_work_status,
     work_status_for_image,
     worklog_path,
@@ -337,6 +338,7 @@ class MainWindow(QMainWindow):
             ("다음 이미지", self.config.shortcuts["next_image"]),
             ("화면 맞춤", self.config.shortcuts["reset_view"]),
             ("마지막 박스 삭제", self.config.shortcuts["delete_last_box"]),
+            ("현재 이미지+라벨 삭제", self.config.shortcuts["delete_current_pair"]),
             ("테마 전환", self.config.shortcuts["toggle_theme"]),
             ("설정 열기", self.config.shortcuts["open_settings"]),
         ]
@@ -485,6 +487,7 @@ class MainWindow(QMainWindow):
         self._bind_shortcut(self.config.shortcuts["next_image"], self.go_next_image)
         self._bind_shortcut(self.config.shortcuts["reset_view"], self.reset_canvas_view)
         self._bind_shortcut(self.config.shortcuts["delete_last_box"], self.delete_last_box)
+        self._bind_shortcut(self.config.shortcuts["delete_current_pair"], self.delete_current_image_pair)
         self._bind_shortcut(self.config.shortcuts["toggle_theme"], self.toggle_theme)
         self._bind_shortcut(self.config.shortcuts["open_settings"], self.open_settings)
 
@@ -814,6 +817,54 @@ class MainWindow(QMainWindow):
         self._refresh_current_image_item_color()
         self.mode_label.setText("모드: 마지막 박스 삭제")
         self.update_training_availability()
+
+    def delete_current_image_pair(self) -> None:
+        """현재 이미지와 같은 이름의 라벨 txt를 작업 목록에서 삭제합니다."""
+        if self.training_thread is not None or self.auto_label_thread is not None:
+            QMessageBox.warning(self, "삭제 불가", "학습 또는 오토 라벨 실행 중에는 파일을 삭제할 수 없습니다.")
+            return
+        if self.current_work_dir is None or self.current_image_index < 0:
+            return
+        if self.current_image_index >= len(self.current_image_paths):
+            return
+
+        delete_index = self.current_image_index
+        image_path = self.current_image_paths[delete_index]
+        label_path = image_path.with_suffix(".txt")
+
+        try:
+            image_path.unlink(missing_ok=True)
+            label_path.unlink(missing_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "삭제 실패", f"파일을 삭제하지 못했습니다.\n{exc}")
+            return
+
+        del self.current_image_paths[delete_index]
+        self.work_statuses.pop(image_path, None)
+        self.work_statuses = save_worklog_statuses(
+            self.current_work_dir,
+            self.current_image_paths,
+            self.work_statuses,
+        )
+
+        if not self.current_image_paths:
+            self.current_image_index = -1
+            self.current_labels = []
+            self.image_list.clear()
+            self.canvas.clear_image()
+            self._refresh_image_navigation_controls()
+            self.status_light.setStyleSheet("font-size: 28pt; color: #ff4d4f; border: none;")
+            self.status_text.setText("이미지 없음")
+            self.update_training_availability()
+            self.statusBar().showMessage(f"삭제 완료: {image_path.name}")
+            return
+
+        next_index = min(delete_index, len(self.current_image_paths) - 1)
+        self.current_image_index = -1
+        self._refresh_image_list()
+        self.load_image_by_index(next_index)
+        self.update_training_availability()
+        self.statusBar().showMessage(f"삭제 완료: {image_path.name}")
 
     def apply_edited_label(
         self,

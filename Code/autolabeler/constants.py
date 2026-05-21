@@ -28,6 +28,7 @@ DEFAULT_SHORTCUTS = {
     "next_image": "D",
     "reset_view": "S",
     "delete_last_box": "R",
+    "delete_current_pair": "Delete",
     "toggle_theme": "T",
     "open_settings": "Ctrl+,",
 }
