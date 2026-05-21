@@ -12,7 +12,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .process_service import build_clean_python_env, clean_windows_dll_search_path, hidden_subprocess_kwargs
+from .process_service import (
+    build_clean_python_env,
+    clean_windows_dll_search_path,
+    external_python_cwd,
+    hidden_subprocess_kwargs,
+)
 
 
 @dataclass
@@ -55,6 +60,7 @@ def resolve_python_command() -> list[str]:
                     text=True,
                     encoding="utf-8",
                     env=build_clean_python_env(),
+                    cwd=external_python_cwd(candidate),
                     **hidden_subprocess_kwargs(),
                 )
             if completed.returncode == 0:
@@ -110,6 +116,7 @@ def detect_hardware() -> HardwareStatus:
                 check=True,
                 encoding="utf-8",
                 env=build_clean_python_env(),
+                cwd=external_python_cwd(python_command),
                 **hidden_subprocess_kwargs(),
             )
         payload = json.loads(completed.stdout.strip())

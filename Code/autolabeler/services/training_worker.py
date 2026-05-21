@@ -11,7 +11,12 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from .process_service import build_clean_python_env, clean_windows_dll_search_path, hidden_subprocess_kwargs
+from .process_service import (
+    build_clean_python_env,
+    clean_windows_dll_search_path,
+    external_python_cwd,
+    hidden_subprocess_kwargs,
+)
 from .training_service import recreate_temp_dataset
 
 
@@ -96,6 +101,7 @@ class TrainingWorker(QObject):
                     stderr=subprocess.STDOUT,
                     text=False,
                     env=process_env,
+                    cwd=external_python_cwd(self.request.python_command),
                     **hidden_subprocess_kwargs(),
                 )
 

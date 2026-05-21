@@ -28,7 +28,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..services.process_service import build_clean_python_env, clean_windows_dll_search_path, hidden_subprocess_kwargs
+from ..services.process_service import (
+    build_clean_python_env,
+    clean_windows_dll_search_path,
+    external_python_cwd,
+    hidden_subprocess_kwargs,
+)
 
 from ..constants import CLASS_COLORS
 from ..models import AppConfig, ModelOption
@@ -267,6 +272,7 @@ class ResultValidationDialog(QDialog):
                         capture_output=True,
                         text=False,
                         env=process_env,
+                        cwd=external_python_cwd(self._python_command),
                         check=False,
                         **hidden_subprocess_kwargs(),
                     )
