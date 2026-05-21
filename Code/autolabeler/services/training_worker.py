@@ -11,11 +11,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from .process_service import (
-    build_clean_python_env,
-    clean_windows_dll_search_path,
-    hidden_subprocess_kwargs,
-)
+from .process_service import build_clean_python_env, clean_windows_dll_search_path
 from .training_service import recreate_temp_dataset
 
 
@@ -93,6 +89,19 @@ class TrainingWorker(QObject):
             self.status_changed.emit("Temp 데이터셋 생성 완료")
             # 자식 Python 표준 입출력을 UTF-8로 유도하되, 부모 쪽에서는 추가 복구 디코딩도 수행합니다.
             process_env = build_clean_python_env()
+            process_env["YOLO_CONFIG_DIR"] = str(self.request.ultralytics_dir)
+            process_env["MPLCONFIGDIR"] = str(self.request.ultralytics_dir)
+            dataset_info.result_dir.mkdir(parents=True, exist_ok=True)
+
+            startup_info = None
+            creation_flags = 0
+            if os.name == "nt":
+                # GUI 앱에서 학습 Python 프로세스를 띄울 때 콘솔 창이 보이지 않도록 합니다.
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup_info.wShowWindow = 0
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
             with clean_windows_dll_search_path():
                 process = subprocess.Popen(
                     command,
@@ -101,7 +110,8 @@ class TrainingWorker(QObject):
                     text=False,
                     env=process_env,
                     cwd=str(dataset_info.result_dir),
-                    **hidden_subprocess_kwargs(),
+                    startupinfo=startup_info,
+                    creationflags=creation_flags,
                 )
 
             if process.stdout is None:

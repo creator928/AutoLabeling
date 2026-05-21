@@ -15,8 +15,6 @@ from pathlib import Path
 from .process_service import (
     build_clean_python_env,
     clean_windows_dll_search_path,
-    external_python_cwd,
-    hidden_subprocess_kwargs,
 )
 
 
@@ -29,6 +27,19 @@ class HardwareStatus:
     gpu_name: str
     cpu_name: str
     cuda_runtime_available: bool
+
+
+def _hidden_subprocess_kwargs() -> dict[str, object]:
+    """Windows GUI 앱에서 점검용 콘솔 창이 뜨지 않도록 subprocess 옵션을 반환합니다."""
+    if os.name != "nt":
+        return {}
+    startup_info = subprocess.STARTUPINFO()
+    startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup_info.wShowWindow = 0
+    return {
+        "startupinfo": startup_info,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
 
 
 def resolve_python_command() -> list[str]:
@@ -60,8 +71,7 @@ def resolve_python_command() -> list[str]:
                     text=True,
                     encoding="utf-8",
                     env=build_clean_python_env(),
-                    cwd=external_python_cwd(candidate),
-                    **hidden_subprocess_kwargs(),
+                    **_hidden_subprocess_kwargs(),
                 )
             if completed.returncode == 0:
                 return candidate
@@ -84,7 +94,7 @@ def detect_hardware() -> HardwareStatus:
             text=True,
             check=True,
             encoding="utf-8",
-            **hidden_subprocess_kwargs(),
+            **_hidden_subprocess_kwargs(),
         )
         first_line = next((line.strip() for line in completed.stdout.splitlines() if line.strip()), "")
         if first_line:
@@ -116,8 +126,7 @@ def detect_hardware() -> HardwareStatus:
                 check=True,
                 encoding="utf-8",
                 env=build_clean_python_env(),
-                cwd=external_python_cwd(python_command),
-                **hidden_subprocess_kwargs(),
+                **_hidden_subprocess_kwargs(),
             )
         payload = json.loads(completed.stdout.strip())
         cuda_runtime_available = bool(payload.get("gpu", False))
