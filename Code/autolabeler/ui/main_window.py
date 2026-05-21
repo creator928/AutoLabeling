@@ -630,7 +630,7 @@ class MainWindow(QMainWindow):
         self.set_image_work_status(image_path, "v")
 
     def confirm_no_object_review(self) -> None:
-        """객체가 없는 이미지를 검토 완료로 표시할지 사용자에게 확인합니다."""
+        """오토 라벨 결과를 검토 완료 또는 재작업 대상으로 표시합니다."""
         if self.current_image_index < 0 or self.current_image_index >= len(self.current_image_paths):
             return
 
@@ -638,11 +638,13 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "사용자 검토 확인창",
-            "해당 이미지를 검토한 것으로 변경하겠습니까?",
+            "해당 이미지를 검토 완료로 변경하겠습니까?\n아니오를 선택하면 다시 오토 라벨링할 대상으로 변경합니다.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Yes,
         )
         if answer == QMessageBox.StandardButton.Yes:
+            # 객체가 없는 이미지도 네거티브 샘플로 학습되도록 빈 라벨 파일을 보장합니다.
+            image_path.with_suffix(".txt").touch(exist_ok=True)
             self.set_image_work_status(image_path, "v")
             self._refresh_work_status(image_path)
             self._refresh_current_image_item_color()
@@ -651,6 +653,8 @@ class MainWindow(QMainWindow):
             return
 
         if answer == QMessageBox.StandardButton.No:
+            # 다시 오토 라벨링할 이미지라도 배경 샘플로 쓸 수 있게 빈 라벨 파일을 남깁니다.
+            image_path.with_suffix(".txt").touch(exist_ok=True)
             self.set_image_work_status(image_path, "n")
             self._refresh_work_status(image_path)
             self._refresh_current_image_item_color()
