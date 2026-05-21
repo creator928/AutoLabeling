@@ -77,4 +77,10 @@ MODEL_OPTIONS = [
         description="조금 더 무겁지만 정확도가 높을 수 있는 대안 모델입니다.",
         download_url="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s.pt",
     ),
+    ModelOption(
+        name="YOLO11 Large",
+        weight_name="yolo11l.pt",
+        description="정확도 우선 작업에 사용할 수 있는 대형 모델입니다.",
+        download_url="https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11l.pt",
+    ),
 ]
