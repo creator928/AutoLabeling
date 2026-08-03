@@ -100,9 +100,9 @@ def main() -> int:
         if lines:
             label_path.write_text("\n".join(lines), encoding="utf-8")
             labeled_count += 1
-        elif label_path.exists():
-            # 재추론 결과가 없으면 기존 자동 라벨도 제거해 현재 결과와 일치시킵니다.
-            label_path.unlink()
+        else:
+            # 재추론 결과가 없어도 검토/학습용 네거티브 샘플로 빈 라벨 파일을 유지합니다.
+            label_path.write_text("", encoding="utf-8")
 
         # 오토 라벨이 시도된 이미지는 결과 유무와 무관하게 자동 처리 상태로 기록합니다.
         work_statuses[image_path] = "a"

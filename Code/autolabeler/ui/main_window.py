@@ -5,16 +5,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, Qt
-from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QShortcut
+from PyQt6.QtCore import QEvent, QSize, QThread, Qt
+from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -24,12 +27,14 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStyle,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
 
 from ..config import save_app_config
-from ..constants import CLASS_COLORS
+from ..constants import APP_VERSION, CLASS_COLORS, SHORTCUT_LABELS
 from ..models import AppConfig, LabelBox
 from ..services.auto_label_worker import AutoLabelRequest, AutoLabelWorker
 from ..services.hardware_service import detect_hardware
@@ -55,6 +60,38 @@ from .styles import build_stylesheet
 from .validation_dialog import VerifyImageDialog
 
 
+class ColorItemDelegate(QStyledItemDelegate):
+    """클래스 색상 아이템을 검정 테두리 텍스트로 직접 그립니다."""
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        """선택 상태에 따라 배경색과 텍스트 내부색을 분리해 그립니다."""
+        color_hex = str(index.data(Qt.ItemDataRole.UserRole) or "#8a8a8a")
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        text_rect = rect.adjusted(4, 0, -4, 0)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        if selected:
+            painter.fillRect(rect, QColor(color_hex))
+        painter.setPen(QPen(QColor("#111111"), 1))
+        painter.drawRect(rect)
+
+        font = option.font
+        font.setBold(selected)
+        painter.setFont(font)
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            painter.setPen(QColor("#111111"))
+            painter.drawText(
+                text_rect.translated(dx, dy),
+                Qt.AlignmentFlag.AlignVCenter,
+                str(index.data(Qt.ItemDataRole.DisplayRole)),
+            )
+        painter.setPen(QColor("#ffffff") if selected else QColor(color_hex))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, str(index.data(Qt.ItemDataRole.DisplayRole)))
+        painter.restore()
+
+
 class MainWindow(QMainWindow):
     """좌측 제어 패널과 우측 작업 영역을 포함한 메인 화면입니다."""
 
@@ -69,7 +106,10 @@ class MainWindow(QMainWindow):
         self.work_statuses: dict[Path, WorkStatus] = {}
         self.selected_class_index = 0
         self.shortcuts: list[QShortcut] = []
+        self.held_class_change_index: int | None = None
+        self.syncing_label_selection = False
         self.training_option_inputs: dict[str, QLineEdit] = {}
+        self.work_info_label: QLabel | None = None
         self.hardware_status = detect_hardware()
         self.training_thread: QThread | None = None
         self.training_worker: TrainingWorker | None = None
@@ -77,11 +117,12 @@ class MainWindow(QMainWindow):
         self.auto_label_worker: AutoLabelWorker | None = None
         self.validation_dialog: VerifyImageDialog | None = None
 
-        self.setWindowTitle("AutoLabeler")
+        self.setWindowTitle(f"AutoLabeler {APP_VERSION}")
         self.resize(1600, 900)
         self._build_ui()
         self._apply_theme()
         self._install_shortcuts()
+        QApplication.instance().installEventFilter(self)
         self.showMaximized()
     
     def _build_ui(self) -> None:
@@ -107,11 +148,19 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 16pt; font-weight: 700;")
         left_layout.addWidget(title)
 
+        # 버전은 화면 식별용 보조 정보라 앱에서 쓰는 최저 폰트보다 작게 표시합니다.
+        version_label = QLabel(APP_VERSION, left_panel)
+        version_label.setStyleSheet("font-size: 7pt;")
+        left_layout.addWidget(version_label)
+
         self.mode_label = QLabel("모드: 대기", left_panel)
         left_layout.addWidget(self.mode_label)
 
         self.class_label = QLabel("선택 클래스: 0", left_panel)
         left_layout.addWidget(self.class_label)
+
+        self.zoom_label = QLabel("배율: -", left_panel)
+        left_layout.addWidget(self.zoom_label)
 
         self.folder_button = QPushButton("작업 폴더 선택", left_panel)
         self.folder_button.clicked.connect(self.select_work_folder)
@@ -127,7 +176,13 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(QLabel("단축키 안내", left_panel))
         self.shortcut_guide = QListWidget(left_panel)
-        self.shortcut_guide.setMaximumHeight(160)
+        self.shortcut_guide.setMaximumHeight(220)
+        self.shortcut_guide.setSpacing(0)
+        self.shortcut_guide.setUniformItemSizes(True)
+        self.shortcut_guide.setStyleSheet(
+            "QListWidget { padding: 0px; } "
+            "QListWidget::item { padding: 0px 2px; margin: 0px; min-height: 16px; }"
+        )
         left_layout.addWidget(self.shortcut_guide)
         self._refresh_shortcut_guide()
 
@@ -214,6 +269,18 @@ class MainWindow(QMainWindow):
         autolabel_conf_form.addRow("Auto Label Conf", self.training_option_inputs["auto_label_conf"])
         autolabel_layout.addLayout(autolabel_conf_form)
         left_layout.addWidget(autolabel_panel)
+
+        work_info_group = QGroupBox("작업 정보", left_panel)
+        work_info_layout = QVBoxLayout(work_info_group)
+        work_info_layout.setContentsMargins(6, 6, 6, 6)
+        work_info_layout.setSpacing(2)
+        self.work_info_label = QLabel(work_info_group)
+        self.work_info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.work_info_label.setStyleSheet("font-family: Consolas, 'Malgun Gothic';")
+        work_info_layout.addWidget(self.work_info_label)
+        left_layout.addWidget(work_info_group)
+        self.update_work_info_summary()
+
         left_layout.addStretch(1)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -232,12 +299,29 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(2, 2, 2, 2)
         center_layout.setSpacing(2)
 
+        self.class_list = QListWidget(center_panel)
+        self.class_list.setFlow(QListView.Flow.LeftToRight)
+        self.class_list.setWrapping(False)
+        self.class_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.class_list.setMovement(QListView.Movement.Static)
+        self.class_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.class_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.class_list.setSpacing(1)
+        self.class_list.setFixedHeight(34)
+        self._configure_compact_colored_list(self.class_list)
+        self.class_list.itemClicked.connect(lambda item: self.select_class(self.class_list.row(item)))
+        self.class_list.currentRowChanged.connect(lambda _row: self._update_class_item_styles())
+        center_layout.addWidget(self.class_list)
+
         self.canvas = ImageCanvas(center_panel)
         self.canvas.box_created.connect(self.add_box_from_canvas)
         self.canvas.mask_requested.connect(self.request_mask)
         self.canvas.label_edited.connect(self.apply_edited_label)
+        self.canvas.label_class_change_requested.connect(self.apply_label_class_change)
         self.canvas.label_deleted.connect(self.apply_deleted_label)
+        self.canvas.label_selection_changed.connect(self.sync_label_selection_from_canvas)
         self.canvas.interaction_finished.connect(self.enter_hand_mode)
+        self.canvas.zoom_changed.connect(self.update_zoom_label)
         self.canvas.set_input_mode(self.config.rectangle_input_mode)
         center_layout.addWidget(self.canvas, stretch=1)
 
@@ -273,9 +357,12 @@ class MainWindow(QMainWindow):
         status_card_layout.addWidget(self.status_text)
         sidebar_layout.addWidget(status_card)
 
-        sidebar_layout.addWidget(QLabel("클래스 정보", right_sidebar))
-        self.class_list = QListWidget(right_sidebar)
-        sidebar_layout.addWidget(self.class_list, stretch=3)
+        sidebar_layout.addWidget(QLabel("현재 이미지 라벨", right_sidebar))
+        self.image_label_list = QListWidget(right_sidebar)
+        self.image_label_list.setSpacing(1)
+        self._configure_compact_colored_list(self.image_label_list)
+        self.image_label_list.currentRowChanged.connect(self.select_label_from_list)
+        sidebar_layout.addWidget(self.image_label_list, stretch=3)
 
         sidebar_layout.addWidget(QLabel("이미지 목록", right_sidebar))
 
@@ -302,6 +389,9 @@ class MainWindow(QMainWindow):
         self.image_go_button = QPushButton("Go", image_nav_panel)
         self.image_go_button.clicked.connect(self.go_to_selected_image_index)
         image_go_row.addWidget(self.image_go_button)
+        self.find_unreviewed_button = QPushButton("미작업 찾기", image_nav_panel)
+        self.find_unreviewed_button.clicked.connect(self.find_first_unreviewed_image)
+        image_go_row.addWidget(self.find_unreviewed_button)
         image_nav_layout.addLayout(image_go_row)
 
         self.image_index_slider.valueChanged.connect(self.sync_image_spinbox_from_slider)
@@ -329,29 +419,25 @@ class MainWindow(QMainWindow):
     def _refresh_shortcut_guide(self) -> None:
         """좌측 안내 패널의 단축키 설명을 다시 그립니다."""
         self.shortcut_guide.clear()
-        entries = [
-            ("박스 그리기", self.config.shortcuts["draw_box"]),
-            ("마스킹", self.config.shortcuts["mask_area"]),
-            ("편집", self.config.shortcuts["edit_box"]),
-            ("작업 취소", self.config.shortcuts["cancel_mode"]),
-            ("이전 이미지", self.config.shortcuts["prev_image"]),
-            ("다음 이미지", self.config.shortcuts["next_image"]),
-            ("화면 맞춤", self.config.shortcuts["reset_view"]),
-            ("마지막 박스 삭제", self.config.shortcuts["delete_last_box"]),
-            ("현재 이미지+라벨 삭제", self.config.shortcuts["delete_current_pair"]),
-            ("테마 전환", self.config.shortcuts["toggle_theme"]),
-            ("설정 열기", self.config.shortcuts["open_settings"]),
-        ]
-        for title, key_text in entries:
-            self.shortcut_guide.addItem(f"{title} : {key_text}")
-        # 요청에 맞춰 좌측 단축키 표시에는 `, 1, 2, 3, 4만 간단히 노출합니다.
-        for class_index in ("0", "1", "2", "3", "4"):
+        for action_name, title in SHORTCUT_LABELS.items():
+            key_text = self.config.shortcuts.get(action_name)
+            if key_text:
+                self._add_shortcut_guide_item(f"{key_text} : {title}")
+
+        for class_index in sorted(self.config.class_shortcuts, key=lambda value: int(value)):
             key_text = self.config.class_shortcuts.get(class_index)
             if key_text:
-                label = "`" if class_index == "0" else class_index
-                self.shortcut_guide.addItem(f"클래스 {label} : {key_text}")
-        if self.is_plain_key_unassigned("Z"):
-            self.shortcut_guide.addItem("빈 이미지 검토 : Z")
+                self._add_shortcut_guide_item(f"{key_text} : 클래스 {class_index}")
+
+        # 편집 모드 선택 박스 이동은 캔버스 직접 키 처리라 설정 단축키와 별도로 안내합니다.
+        self._add_shortcut_guide_item("방향키 : 선택 1px 이동")
+        self._add_shortcut_guide_item("Shift+방향키 : 선택 10px 이동")
+
+    def _add_shortcut_guide_item(self, text: str) -> None:
+        """좌측 단축키 안내 행을 작은 높이로 추가해 더 많은 항목을 표시합니다."""
+        item = QListWidgetItem(text)
+        item.setSizeHint(QSize(160, 16))
+        self.shortcut_guide.addItem(item)
 
     def _create_training_option_input(self, text: str) -> QLineEdit:
         """학습 옵션 입력칸을 만들고 기본값은 읽기 전용 표시 상태로 둡니다."""
@@ -401,6 +487,42 @@ class MainWindow(QMainWindow):
             return max(0, int(self.training_option_inputs["dataset_size"].text() or "0"))
         except ValueError:
             return 0
+
+    def work_status_counts(self) -> dict[WorkStatus, int]:
+        """작업 정보 표시용으로 현재 worklog 상태별 이미지 수를 집계합니다."""
+        counts: dict[WorkStatus, int] = {"n": 0, "v": 0, "a": 0}
+        for image_path in self.current_image_paths:
+            counts[work_status_for_image(self.work_statuses, image_path)] += 1
+        return counts
+
+    def update_work_info_summary(self) -> None:
+        """좌측 작업 정보 그룹에 worklog 통계와 학습 검토 필요량을 표시합니다."""
+        if self.work_info_label is None:
+            return
+
+        counts = self.work_status_counts()
+        total_count = len(self.current_image_paths)
+        training_review_needed = max(0, self.current_dataset_size() - counts["v"])
+        self.work_info_label.setText(
+            "\n".join(
+                [
+                    f"[n]미검토     : {counts['n']:>6}개",
+                    f"[v]검토완료   : {counts['v']:>6}개",
+                    f"[a]오토라벨   : {counts['a']:>6}개",
+                    f"총            : {total_count:>6}개",
+                    f"학습용 검토 필요 : {training_review_needed:>6}개",
+                ]
+            )
+        )
+
+    def update_zoom_label(self) -> None:
+        """좌측 상단에 화면맞춤 기준 배율과 원본 대비 표시 비율을 갱신합니다."""
+        if self.canvas.image.isNull():
+            self.zoom_label.setText("배율: -")
+            return
+        fit_percent = round(self.canvas.zoom_factor * 100)
+        original_percent = round(self.canvas.original_display_scale() * 100)
+        self.zoom_label.setText(f"배율: {fit_percent}% (원본 {original_percent}%)")
 
     def current_epochs(self) -> int:
         """Epochs 입력값을 반환합니다."""
@@ -465,6 +587,7 @@ class MainWindow(QMainWindow):
             and self.auto_label_thread is None
         )
         self.auto_label_button.setEnabled(bool(auto_label_ready))
+        self.update_work_info_summary()
 
     def toggle_training_option_edit_mode(self, checked: bool) -> None:
         """설정 수정 버튼 상태에 따라 학습 옵션 입력칸의 편집 가능 여부를 바꿉니다."""
@@ -485,16 +608,16 @@ class MainWindow(QMainWindow):
         self._bind_shortcut(self.config.shortcuts["cancel_mode"], self.cancel_active_mode)
         self._bind_shortcut(self.config.shortcuts["prev_image"], self.go_prev_image)
         self._bind_shortcut(self.config.shortcuts["next_image"], self.go_next_image)
-        self._bind_shortcut(self.config.shortcuts["reset_view"], self.reset_canvas_view)
+        self._bind_shortcut(self.config.shortcuts["reset_view"], self.handle_reset_view_shortcut)
         self._bind_shortcut(self.config.shortcuts["delete_last_box"], self.delete_last_box)
         self._bind_shortcut(self.config.shortcuts["delete_current_pair"], self.delete_current_image_pair)
+        self._bind_shortcut(self.config.shortcuts["review_current_image"], self.confirm_no_object_review)
+        self._bind_shortcut(self.config.shortcuts["find_unreviewed_image"], self.find_first_unreviewed_image)
         self._bind_shortcut(self.config.shortcuts["toggle_theme"], self.toggle_theme)
         self._bind_shortcut(self.config.shortcuts["open_settings"], self.open_settings)
 
         for class_index, key_text in self.config.class_shortcuts.items():
-            self._bind_shortcut(key_text, lambda idx=int(class_index): self.select_class(idx))
-        if self.is_plain_key_unassigned("Z"):
-            self._bind_shortcut("Z", self.confirm_no_object_review)
+            self._bind_shortcut(key_text, lambda idx=int(class_index): self.handle_class_shortcut(idx))
 
     def _bind_shortcut(self, key_text: str, callback) -> None:
         """단축키 문자열을 QShortcut으로 바인딩합니다."""
@@ -512,6 +635,67 @@ class MainWindow(QMainWindow):
             if configured_key.strip().upper() == target:
                 return False
         return True
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """클래스 단축키를 누른 상태를 캔버스 편집 클릭에 전달합니다."""
+        if event.type() == QEvent.Type.KeyPress:
+            class_index = self._class_index_from_key_event(event)
+            if class_index is not None:
+                self.held_class_change_index = class_index
+                self.canvas.set_held_class_index(class_index)
+                self.canvas.update()
+        elif event.type() == QEvent.Type.KeyRelease:
+            class_index = self._class_index_from_key_event(event)
+            if class_index is not None and class_index == self.held_class_change_index:
+                self.held_class_change_index = None
+                self.canvas.set_held_class_index(None)
+                self.canvas.update()
+        return super().eventFilter(watched, event)
+
+    def _class_index_from_key_text(self, key_text: str) -> int | None:
+        """현재 클래스 단축키 설정에서 눌린 단일 키의 클래스 번호를 찾습니다."""
+        if not key_text:
+            return None
+        for class_index_text, shortcut_text in self.config.class_shortcuts.items():
+            if shortcut_text.strip() == key_text:
+                class_index = int(class_index_text)
+                if not self.class_names or 0 <= class_index < len(self.class_names):
+                    return class_index
+        return None
+
+    def _class_index_from_key_event(self, event) -> int | None:
+        """키 텍스트와 실제 키 코드를 함께 사용해 클래스 단축키를 찾습니다."""
+        class_index = self._class_index_from_key_text(event.text())
+        if class_index is not None:
+            return class_index
+
+        key_map = {
+            Qt.Key.Key_QuoteLeft: "`",
+            Qt.Key.Key_1: "1",
+            Qt.Key.Key_2: "2",
+            Qt.Key.Key_3: "3",
+            Qt.Key.Key_4: "4",
+            Qt.Key.Key_5: "5",
+            Qt.Key.Key_6: "6",
+            Qt.Key.Key_7: "7",
+            Qt.Key.Key_8: "8",
+            Qt.Key.Key_9: "9",
+            Qt.Key.Key_0: "0",
+        }
+        key_text = key_map.get(event.key())
+        if key_text is None:
+            return None
+        return self._class_index_from_key_text(key_text)
+
+    def handle_class_shortcut(self, class_index: int) -> None:
+        """클래스 선택 단축키와 편집 모드 클래스 변경 상태를 함께 처리합니다."""
+        if self.class_names and not 0 <= class_index < len(self.class_names):
+            return
+        self.select_class(class_index)
+        if self.canvas.current_mode == "edit":
+            self.held_class_change_index = class_index
+            self.canvas.set_held_class_index(class_index)
+            self.canvas.update()
 
     def select_work_folder(self) -> None:
         """사용자가 작업 폴더를 선택하면 클래스와 이미지 목록을 준비합니다."""
@@ -550,9 +734,106 @@ class MainWindow(QMainWindow):
         self.class_list.clear()
         for index, name in enumerate(self.class_names):
             item = QListWidgetItem(f"{index}:{name}")
-            item.setForeground(QColor(CLASS_COLORS[index % len(CLASS_COLORS)]))
+            item.setSizeHint(QSize(max(72, len(name) * 7 + 34), 22))
+            item.setData(Qt.ItemDataRole.UserRole, CLASS_COLORS[index % len(CLASS_COLORS)])
             self.class_list.addItem(item)
         self.select_class(min(self.selected_class_index, max(0, len(self.class_names) - 1)))
+
+    def _configure_compact_colored_list(self, list_widget: QListWidget) -> None:
+        """색상 목록 아이템의 여백과 테두리를 작고 단정하게 맞춥니다."""
+        list_widget.setStyleSheet(
+            "QListWidget { border: 1px solid #c7c7c7; background: transparent; }"
+            "QListWidget::item { border: 1px solid #111111; padding: 1px 4px; margin: 0px; }"
+            "QListWidget::item:selected { border: 1px solid #111111; }"
+        )
+        list_widget.setItemDelegate(ColorItemDelegate(list_widget))
+
+    def _style_colored_item(self, item: QListWidgetItem, color_hex: str, selected: bool) -> None:
+        """선택 여부에 따라 색상 아이템의 배경, 글자색, 굵기를 적용합니다."""
+        font = item.font()
+        font.setBold(selected)
+        item.setFont(font)
+        if selected:
+            item.setBackground(QColor(color_hex))
+            item.setForeground(QColor("#ffffff"))
+        else:
+            item.setBackground(QColor(0, 0, 0, 0))
+            item.setForeground(QColor(color_hex))
+
+    def _update_class_item_styles(self) -> None:
+        """현재 선택 클래스만 색상 배경으로 강조합니다."""
+        for row in range(self.class_list.count()):
+            item = self.class_list.item(row)
+            color_hex = str(item.data(Qt.ItemDataRole.UserRole) or CLASS_COLORS[row % len(CLASS_COLORS)])
+            self._style_colored_item(item, color_hex, row == self.selected_class_index)
+
+    def _update_image_label_item_styles(self) -> None:
+        """현재 선택한 라벨 정보만 색상 배경으로 강조합니다."""
+        current_row = self.image_label_list.currentRow()
+        for row in range(self.image_label_list.count()):
+            item = self.image_label_list.item(row)
+            color_hex = str(item.data(Qt.ItemDataRole.UserRole) or "#8a8a8a")
+            self._style_colored_item(item, color_hex, row == current_row)
+
+    def select_label_from_list(self, row: int) -> None:
+        """우측 라벨 목록 선택을 캔버스의 지속 선택 상태에 반영합니다."""
+        if self.syncing_label_selection:
+            self._update_image_label_item_styles()
+            return
+        if row < 0 or row >= len(self.current_labels):
+            self.canvas.set_selected_label_index(None)
+            self._update_image_label_item_styles()
+            return
+        if self.canvas.current_mode != "edit":
+            self.set_canvas_mode("edit")
+        self.canvas.set_selected_label_index(row)
+        self.canvas.setFocus(Qt.FocusReason.MouseFocusReason)
+        self._update_image_label_item_styles()
+
+    def sync_label_selection_from_canvas(self, label_index: int) -> None:
+        """캔버스의 라벨 선택 변경을 우측 라벨 목록에 반영합니다."""
+        self.syncing_label_selection = True
+        try:
+            if label_index < 0 or label_index >= len(self.current_labels):
+                self.image_label_list.setCurrentRow(-1)
+                self.image_label_list.clearSelection()
+            else:
+                self.image_label_list.setCurrentRow(label_index)
+        finally:
+            self.syncing_label_selection = False
+        self._update_image_label_item_styles()
+
+    def _class_display_name(self, class_index: int) -> str:
+        """클래스 번호와 이름을 화면 표시용 문자열로 합칩니다."""
+        if 0 <= class_index < len(self.class_names):
+            return f"{class_index}:{self.class_names[class_index]}"
+        return f"{class_index}:Unknown"
+
+    def _refresh_current_label_list(self) -> None:
+        """현재 이미지에 존재하는 라벨 목록을 우측 패널에 표시합니다."""
+        current_selection = self.canvas.selected_label_index
+        self.image_label_list.blockSignals(True)
+        self.image_label_list.clear()
+        if not self.current_labels:
+            self.image_label_list.addItem("라벨 없음")
+            self.image_label_list.setCurrentRow(-1)
+            self.image_label_list.blockSignals(False)
+            self._update_image_label_item_styles()
+            return
+        for index, label in enumerate(self.current_labels, start=1):
+            item = QListWidgetItem(
+                f"#{index} {self._class_display_name(label.class_index)}  "
+                f"w={label.width:.3f}, h={label.height:.3f}"
+            )
+            item.setSizeHint(QSize(120, 22))
+            item.setData(Qt.ItemDataRole.UserRole, label.color_hex)
+            self.image_label_list.addItem(item)
+        if current_selection is not None and current_selection < len(self.current_labels):
+            self.image_label_list.setCurrentRow(current_selection)
+        else:
+            self.image_label_list.setCurrentRow(-1)
+        self.image_label_list.blockSignals(False)
+        self._update_image_label_item_styles()
 
     def _refresh_image_list(self) -> None:
         """이미지 목록 UI를 작업 폴더 기준으로 다시 채웁니다."""
@@ -607,8 +888,10 @@ class MainWindow(QMainWindow):
         """현재 작업 폴더의 worklog.txt를 다시 읽어 상태 캐시를 갱신합니다."""
         if self.current_work_dir is None:
             self.work_statuses = {}
+            self.update_work_info_summary()
             return
         self.work_statuses = load_worklog_statuses(self.current_work_dir, self.current_image_paths)
+        self.update_work_info_summary()
 
     def set_image_work_status(self, image_path: Path, status: WorkStatus) -> None:
         """개별 이미지의 작업 상태를 갱신하고 worklog.txt에 즉시 반영합니다."""
@@ -621,6 +904,7 @@ class MainWindow(QMainWindow):
             image_path,
             status,
         )
+        self.update_work_info_summary()
 
     def mark_current_image_reviewed(self) -> None:
         """현재 이미지가 사용자의 수동 작업 대상이었음을 worklog에 기록합니다."""
@@ -649,6 +933,8 @@ class MainWindow(QMainWindow):
             self._refresh_work_status(image_path)
             self._refresh_current_image_item_color()
             self.update_training_availability()
+            # Z 검토 처리 후 D 단축키와 동일하게 다음 이미지로 이동합니다.
+            self.go_next_image()
             self.statusBar().showMessage(f"검토 완료 표시: {image_path.name}")
             return
 
@@ -659,6 +945,8 @@ class MainWindow(QMainWindow):
             self._refresh_work_status(image_path)
             self._refresh_current_image_item_color()
             self.update_training_availability()
+            # 재작업 대상으로 표시한 경우도 검토 흐름을 이어가도록 다음 이미지로 이동합니다.
+            self.go_next_image()
             self.statusBar().showMessage(f"미검토 표시: {image_path.name}")
             return
 
@@ -695,6 +983,7 @@ class MainWindow(QMainWindow):
         image_path = self.current_image_paths[index]
         self.current_labels = load_labels(image_path)
         self.canvas.load_image(image_path, self.current_labels)
+        self._refresh_current_label_list()
         if self.class_names:
             active_index = min(self.selected_class_index, len(self.class_names) - 1)
             self.canvas.set_active_class_info(
@@ -726,6 +1015,16 @@ class MainWindow(QMainWindow):
         else:
             self.status_light.setStyleSheet("font-size: 28pt; color: #ff4d4f; border: none;")
             self.status_text.setText("미검토")
+
+    def find_first_unreviewed_image(self) -> None:
+        """리스트 위쪽부터 [v]가 아닌 첫 번째 이미지를 찾아 이동합니다."""
+        for index, image_path in enumerate(self.current_image_paths):
+            if work_status_for_image(self.work_statuses, image_path) != "v":
+                self.reset_canvas_view()
+                self.image_list.setCurrentRow(index)
+                self.statusBar().showMessage(f"미작업 이동: {image_path.name}")
+                return
+        QMessageBox.information(self, "미작업 없음", "[v]가 아닌 작업물이 없습니다.")
 
     def add_box_from_canvas(self, x_center: float, y_center: float, width: float, height: float) -> None:
         """캔버스에서 확정된 사각형을 현재 클래스의 라벨로 저장합니다."""
@@ -794,6 +1093,84 @@ class MainWindow(QMainWindow):
         if self.current_image_index < 0:
             return
         save_labels(self.current_image_paths[self.current_image_index], self.current_labels)
+        self._refresh_current_label_list()
+
+    def _format_file_size(self, file_path: Path) -> str:
+        """삭제 확인창에 표시할 파일 크기 문자열을 만듭니다."""
+        if not file_path.exists():
+            return "없음"
+        size = file_path.stat().st_size
+        if size >= 1024 * 1024:
+            return f"{size / (1024 * 1024):.2f} MB"
+        if size >= 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size} B"
+
+    def confirm_delete_label(self, label: LabelBox, label_index: int) -> bool:
+        """라벨 삭제 전 대상 번호와 좌표 정보를 사용자에게 확인합니다."""
+        message = "\n".join(
+            [
+                "아래 라벨을 삭제하시겠습니까?",
+                "",
+                f"번호: #{label_index + 1}",
+                f"클래스: {self._class_display_name(label.class_index)}",
+                f"중심 위치: x={label.x_center:.6f}, y={label.y_center:.6f}",
+                f"크기: w={label.width:.6f}, h={label.height:.6f}",
+            ]
+        )
+        answer = QMessageBox.question(
+            self,
+            "라벨 삭제 확인",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def confirm_delete_current_image_pair(self, image_path: Path, label_path: Path, delete_index: int) -> bool:
+        """이미지와 라벨 파일을 del 폴더로 옮기기 전 대상 파일 정보를 사용자에게 확인합니다."""
+        image = QImage(str(image_path))
+        image_size = "확인 불가" if image.isNull() else f"{image.width()} x {image.height()} px"
+        status = work_status_for_image(self.work_statuses, image_path)
+        message = "\n".join(
+            [
+                "아래 이미지와 라벨 파일을 del 폴더로 옮기시겠습니까?",
+                "",
+                f"번호: {delete_index + 1} / {len(self.current_image_paths)}",
+                f"worklog 상태: [{status}]",
+                f"이미지 위치: {image_path}",
+                f"이미지 크기: {image_size}",
+                f"이미지 파일 크기: {self._format_file_size(image_path)}",
+                f"라벨 위치: {label_path}",
+                f"라벨 파일 크기: {self._format_file_size(label_path)}",
+                f"라벨 개수: {len(self.current_labels)}개",
+            ]
+        )
+        answer = QMessageBox.question(
+            self,
+            "이미지 삭제 확인",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _move_file_to_del_folder(self, file_path: Path, del_dir: Path) -> None:
+        """파일 삭제 대신 작업 폴더의 del 하위 폴더로 대상 파일을 이동합니다."""
+        if not file_path.exists():
+            return
+        target_path = del_dir / file_path.name
+        if target_path.exists():
+            stem = file_path.stem
+            suffix = file_path.suffix
+            counter = 1
+            while True:
+                candidate = del_dir / f"{stem}_{counter}{suffix}"
+                if not candidate.exists():
+                    target_path = candidate
+                    break
+                counter += 1
+        file_path.replace(target_path)
 
     def go_prev_image(self) -> None:
         """이전 이미지가 있을 때만 이동합니다."""
@@ -810,22 +1187,28 @@ class MainWindow(QMainWindow):
         self.image_list.setCurrentRow(self.current_image_index + 1)
 
     def delete_last_box(self) -> None:
-        """현재 이미지의 마지막 라벨 하나를 제거합니다."""
+        """선택된 라벨이 있으면 해당 라벨을, 없으면 마지막 라벨을 제거합니다."""
         if not self.current_labels:
             return
-        self.current_labels.pop()
+        delete_index = self.canvas.selected_label_index
+        if delete_index is None or delete_index < 0 or delete_index >= len(self.current_labels):
+            delete_index = len(self.current_labels) - 1
+        target_label = self.current_labels[delete_index]
+        if not self.confirm_delete_label(target_label, delete_index):
+            return
+        self.current_labels.pop(delete_index)
         self.canvas.set_labels(self.current_labels)
         self._save_current_labels()
         self.mark_current_image_reviewed()
         self._refresh_work_status(self.current_image_paths[self.current_image_index])
         self._refresh_current_image_item_color()
-        self.mode_label.setText("모드: 마지막 박스 삭제")
+        self.mode_label.setText("모드: 라벨 삭제")
         self.update_training_availability()
 
     def delete_current_image_pair(self) -> None:
-        """현재 이미지와 같은 이름의 라벨 txt를 작업 목록에서 삭제합니다."""
+        """현재 이미지와 같은 이름의 라벨 txt를 del 폴더로 이동합니다."""
         if self.training_thread is not None or self.auto_label_thread is not None:
-            QMessageBox.warning(self, "삭제 불가", "학습 또는 오토 라벨 실행 중에는 파일을 삭제할 수 없습니다.")
+            QMessageBox.warning(self, "삭제 불가", "학습 또는 오토 라벨 실행 중에는 파일을 이동할 수 없습니다.")
             return
         if self.current_work_dir is None or self.current_image_index < 0:
             return
@@ -835,12 +1218,16 @@ class MainWindow(QMainWindow):
         delete_index = self.current_image_index
         image_path = self.current_image_paths[delete_index]
         label_path = image_path.with_suffix(".txt")
+        if not self.confirm_delete_current_image_pair(image_path, label_path, delete_index):
+            return
 
         try:
-            image_path.unlink(missing_ok=True)
-            label_path.unlink(missing_ok=True)
+            del_dir = self.current_work_dir / "del"
+            del_dir.mkdir(exist_ok=True)
+            self._move_file_to_del_folder(image_path, del_dir)
+            self._move_file_to_del_folder(label_path, del_dir)
         except OSError as exc:
-            QMessageBox.warning(self, "삭제 실패", f"파일을 삭제하지 못했습니다.\n{exc}")
+            QMessageBox.warning(self, "이동 실패", f"파일을 del 폴더로 옮기지 못했습니다.\n{exc}")
             return
 
         del self.current_image_paths[delete_index]
@@ -855,12 +1242,13 @@ class MainWindow(QMainWindow):
             self.current_image_index = -1
             self.current_labels = []
             self.image_list.clear()
+            self.image_label_list.clear()
             self.canvas.clear_image()
             self._refresh_image_navigation_controls()
             self.status_light.setStyleSheet("font-size: 28pt; color: #ff4d4f; border: none;")
             self.status_text.setText("이미지 없음")
             self.update_training_availability()
-            self.statusBar().showMessage(f"삭제 완료: {image_path.name}")
+            self.statusBar().showMessage(f"del 이동 완료: {image_path.name}")
             return
 
         next_index = min(delete_index, len(self.current_image_paths) - 1)
@@ -868,7 +1256,7 @@ class MainWindow(QMainWindow):
         self._refresh_image_list()
         self.load_image_by_index(next_index)
         self.update_training_availability()
-        self.statusBar().showMessage(f"삭제 완료: {image_path.name}")
+        self.statusBar().showMessage(f"del 이동 완료: {image_path.name}")
 
     def apply_edited_label(
         self,
@@ -894,15 +1282,36 @@ class MainWindow(QMainWindow):
         self.update_training_availability()
 
     def apply_deleted_label(self, label_index: int) -> None:
-        """편집 모드 우클릭으로 삭제된 박스를 저장 상태에 반영합니다."""
-        if label_index < 0:
+        """편집 모드 우클릭으로 요청된 라벨 삭제를 바로 저장 상태에 반영합니다."""
+        if label_index < 0 or label_index >= len(self.current_labels):
+            self.canvas.cancel_label_delete()
             return
+        self.canvas.confirm_label_deleted(label_index)
         self.canvas.set_labels(self.current_labels)
         self._save_current_labels()
         self.mark_current_image_reviewed()
         self._refresh_work_status(self.current_image_paths[self.current_image_index])
         self._refresh_current_image_item_color()
         self.update_training_availability()
+
+    def apply_label_class_change(self, label_index: int) -> None:
+        """편집 모드에서 클래스 단축키를 누른 채 클릭한 라벨의 클래스를 변경합니다."""
+        if label_index < 0 or label_index >= len(self.current_labels):
+            return
+        if self.held_class_change_index is None:
+            return
+        if self.class_names and self.held_class_change_index >= len(self.class_names):
+            return
+        label = self.current_labels[label_index]
+        label.class_index = self.held_class_change_index
+        label.color_hex = CLASS_COLORS[label.class_index % len(CLASS_COLORS)]
+        self.canvas.set_labels(self.current_labels)
+        self._save_current_labels()
+        self.mark_current_image_reviewed()
+        self._refresh_work_status(self.current_image_paths[self.current_image_index])
+        self._refresh_current_image_item_color()
+        self.update_training_availability()
+        self.statusBar().showMessage(f"라벨 클래스 변경: {label.class_index}")
 
     def select_class(self, class_index: int) -> None:
         """현재 활성 클래스를 바꾸고 UI에도 반영합니다."""
@@ -915,6 +1324,7 @@ class MainWindow(QMainWindow):
         self.selected_class_index = class_index
         self.class_label.setText(f"선택 클래스: {class_index} ({self.class_names[class_index]})")
         self.class_list.setCurrentRow(class_index)
+        self._update_class_item_styles()
         self.canvas.set_active_class_info(
             CLASS_COLORS[class_index % len(CLASS_COLORS)],
             self.class_names[class_index],
@@ -1194,6 +1604,14 @@ class MainWindow(QMainWindow):
         """이미지를 화면 맞춤으로 되돌리고 손 모드 필요 여부를 갱신합니다."""
         self.canvas.reset_view()
         self.enter_hand_mode()
+
+    def handle_reset_view_shortcut(self) -> None:
+        """화면 맞춤 상태에서는 커서 기준 300% 확대, 그 외에는 화면 맞춤으로 전환합니다."""
+        if self.canvas.is_fit_view():
+            self.canvas.zoom_to_cursor(3.0)
+            self.enter_hand_mode()
+            return
+        self.reset_canvas_view()
 
     def open_settings(self) -> None:
         """설정 다이얼로그를 열고 저장 후 즉시 반영합니다."""

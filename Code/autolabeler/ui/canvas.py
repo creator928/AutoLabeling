@@ -6,9 +6,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QCursor, QImage, QMouseEvent, QPainter, QPen, QWheelEvent
+from PyQt6.QtGui import QBrush, QColor, QCursor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
 from PyQt6.QtWidgets import QWidget
 
+from ..constants import CLASS_COLORS
 from ..models import LabelBox
 
 
@@ -18,8 +19,11 @@ class ImageCanvas(QWidget):
     box_created = pyqtSignal(float, float, float, float)
     mask_requested = pyqtSignal(QRect)
     label_edited = pyqtSignal(int, float, float, float, float)
+    label_class_change_requested = pyqtSignal(int)
     label_deleted = pyqtSignal(int)
+    label_selection_changed = pyqtSignal(int)
     interaction_finished = pyqtSignal()
+    zoom_changed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -42,16 +46,19 @@ class ImageCanvas(QWidget):
         self.pan_anchor: QPoint | None = None
         self.pan_start_offset = QPointF(0.0, 0.0)
         self.edit_label_index: int | None = None
+        self.selected_label_index: int | None = None
         self.edit_mode_kind: str | None = None
         self.edit_anchor_name: str | None = None
         self.edit_start_rect: QRectF | None = None
         self.hover_edit_index: int | None = None
         self.hover_edit_kind: str | None = None
         self.hover_handle_name: str | None = None
+        self.held_class_index: int | None = None
         self.erased_feedback_active = False
         self.erased_feedback_timer = QTimer(self)
         self.erased_feedback_timer.setSingleShot(True)
         self.erased_feedback_timer.timeout.connect(self._clear_erased_feedback)
+        self.pending_delete_point: QPoint | None = None
 
     def set_input_mode(self, mode: str) -> None:
         """사각형 입력 방식을 갱신합니다."""
@@ -71,7 +78,9 @@ class ImageCanvas(QWidget):
         self.pan_offset = QPointF(0.0, 0.0)
         self.pan_anchor = None
         self._clear_edit_state()
+        self.set_selected_label_index(None)
         self.update()
+        self.zoom_changed.emit()
 
     def clear_image(self) -> None:
         """현재 표시 중인 이미지와 라벨을 비웁니다."""
@@ -86,7 +95,9 @@ class ImageCanvas(QWidget):
         self.pan_offset = QPointF(0.0, 0.0)
         self.pan_anchor = None
         self._clear_edit_state()
+        self.set_selected_label_index(None)
         self.update()
+        self.zoom_changed.emit()
 
     def set_mode(self, mode: str) -> None:
         """현재 모드를 손, 그리기, 마스킹, 편집 중 하나로 변경합니다."""
@@ -96,6 +107,8 @@ class ImageCanvas(QWidget):
         self.first_click_point = None
         self.pan_anchor = None
         self._clear_edit_state()
+        if mode != "edit":
+            self.set_selected_label_index(None)
         self._update_cursor()
         self.update()
 
@@ -108,6 +121,23 @@ class ImageCanvas(QWidget):
     def set_labels(self, labels: list[LabelBox]) -> None:
         """현재 라벨 목록을 갱신합니다."""
         self.labels = labels
+        if self.selected_label_index is not None and self.selected_label_index >= len(labels):
+            self.set_selected_label_index(None)
+        self.update()
+
+    def set_held_class_index(self, class_index: int | None) -> None:
+        """클래스 단축키를 누른 상태를 편집 클릭 처리에 사용합니다."""
+        self.held_class_index = class_index
+
+    def set_selected_label_index(self, label_index: int | None, emit_signal: bool = True) -> None:
+        """지속 선택 상태의 라벨 인덱스를 갱신합니다."""
+        if label_index is not None and (label_index < 0 or label_index >= len(self.labels)):
+            label_index = None
+        if self.selected_label_index == label_index:
+            return
+        self.selected_label_index = label_index
+        if emit_signal:
+            self.label_selection_changed.emit(-1 if label_index is None else label_index)
         self.update()
 
     def reset_view(self) -> None:
@@ -116,18 +146,89 @@ class ImageCanvas(QWidget):
         self.pan_offset = QPointF(0.0, 0.0)
         self._update_cursor()
         self.update()
+        self.zoom_changed.emit()
+
+    def is_fit_view(self) -> bool:
+        """현재 화면이 배율/위치 초기화 상태인지 확인합니다."""
+        return (
+            abs(self.zoom_factor - 1.0) < 0.0001
+            and abs(self.pan_offset.x()) < 0.0001
+            and abs(self.pan_offset.y()) < 0.0001
+        )
+
+    def zoom_to_cursor(self, zoom_factor: float) -> None:
+        """현재 마우스 커서가 가리키는 이미지 지점을 기준으로 지정 배율까지 확대합니다."""
+        if self.image.isNull():
+            return
+        cursor_point = self.mapFromGlobal(QCursor.pos())
+        self.zoom_to_widget_point(cursor_point, zoom_factor)
+
+    def zoom_to_widget_point(self, point: QPoint, zoom_factor: float) -> None:
+        """위젯 좌표의 특정 지점을 기준으로 확대 배율과 위치를 계산합니다."""
+        target_before = self.target_rect()
+        if target_before.isNull():
+            return
+
+        pointer = self.clamp_to_image(point)
+        if pointer is None:
+            return
+
+        new_zoom = max(0.2, min(8.0, zoom_factor))
+        anchor_x_ratio = (pointer.x() - target_before.left()) / max(1, target_before.width())
+        anchor_y_ratio = (pointer.y() - target_before.top()) / max(1, target_before.height())
+        fit_size = self.image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        scaled_width = max(1, int(fit_size.width() * new_zoom))
+        scaled_height = max(1, int(fit_size.height() * new_zoom))
+        target_left = pointer.x() - anchor_x_ratio * scaled_width
+        target_top = pointer.y() - anchor_y_ratio * scaled_height
+
+        self.zoom_factor = new_zoom
+        self.pan_offset = QPointF(
+            target_left - (self.width() - scaled_width) / 2.0,
+            target_top - (self.height() - scaled_height) / 2.0,
+        )
+        self._update_cursor()
+        self.update()
+        self.zoom_changed.emit()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
-        """휠 입력으로 이미지를 확대/축소합니다."""
+        """휠 입력 시 마우스 포인터가 가리키는 이미지 지점을 기준으로 확대/축소합니다."""
         if self.image.isNull():
             return
         delta = event.angleDelta().y()
         if delta == 0:
             return
+
+        target_before = self.target_rect()
+        if target_before.isNull():
+            return
+
+        pointer = self.clamp_to_image(event.position().toPoint())
+        if pointer is None:
+            return
+
+        old_zoom = self.zoom_factor
         scale_step = 1.1 if delta > 0 else 0.9
-        self.zoom_factor = max(0.2, min(8.0, self.zoom_factor * scale_step))
-        self._update_cursor()
-        self.update()
+        new_zoom = max(0.2, min(8.0, old_zoom * scale_step))
+        if new_zoom == old_zoom:
+            return
+
+        # 포인터 아래 이미지 내 상대 위치를 새 확대율에서도 같은 화면 좌표에 유지합니다.
+        self.zoom_to_widget_point(pointer, new_zoom)
+
+    def original_display_scale(self) -> float:
+        """현재 화면 표시 크기가 원본 이미지 크기의 몇 배인지 반환합니다."""
+        if self.image.isNull() or self.image.width() <= 0:
+            return 0.0
+        target = self.target_rect()
+        if target.isNull():
+            return 0.0
+        return target.width() / self.image.width()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """캔버스 크기가 바뀌면 원본 대비 표시 비율을 다시 알립니다."""
+        super().resizeEvent(event)
+        self.zoom_changed.emit()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         """이미지, 기존 박스, 미리보기, 모드별 가이드를 그립니다."""
@@ -143,7 +244,10 @@ class ImageCanvas(QWidget):
 
         for index, label in enumerate(self.labels):
             rect = self._normalized_to_widget_rect(label.x_center, label.y_center, label.width, label.height)
-            pen_width = 3 if self.current_mode == "edit" and self.edit_label_index == index else 2
+            is_selected = self.current_mode == "edit" and (
+                self.edit_label_index == index or self.selected_label_index == index
+            )
+            pen_width = 4 if is_selected else 2
             painter.setPen(QPen(QColor(label.color_hex), pen_width))
             # 사각형 본체는 항상 테두리만 그려야 하므로 브러시를 비워 채워짐을 방지합니다.
             painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
@@ -164,13 +268,19 @@ class ImageCanvas(QWidget):
         """모드별 입력 시작을 처리합니다."""
         if self.image.isNull():
             return
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
 
         point = self.clamp_to_image(event.position().toPoint())
         if point is None:
             return
 
         if self.current_mode == "edit" and event.button() == Qt.MouseButton.RightButton:
-            self._delete_label_at_point(point)
+            self._update_hover_edit_target(point)
+            if self.hover_edit_index is None:
+                self.set_selected_label_index(None)
+            else:
+                self.set_selected_label_index(self.hover_edit_index)
+                self._delete_label_at_point(point)
             return
 
         if event.button() != Qt.MouseButton.LeftButton:
@@ -184,11 +294,20 @@ class ImageCanvas(QWidget):
             return
 
         if self.current_mode == "edit":
-            if not self._begin_edit(point) and self.zoom_factor > 1.0:
-                # 편집 대상이 없는 빈 영역에서는 확대된 화면을 손 도구처럼 이동할 수 있게 합니다.
-                self.pan_anchor = point
-                self.pan_start_offset = QPointF(self.pan_offset)
-                self._update_cursor(True)
+            if self.held_class_index is not None:
+                self._update_hover_edit_target(point)
+                if self.hover_edit_index is not None:
+                    self.set_selected_label_index(self.hover_edit_index)
+                    self.label_class_change_requested.emit(self.hover_edit_index)
+                    self.update()
+                    return
+            if not self._begin_edit(point):
+                self.set_selected_label_index(None)
+                if self.zoom_factor > 1.0:
+                    # 편집 대상이 없는 빈 영역에서는 확대된 화면을 손 도구처럼 이동할 수 있게 합니다.
+                    self.pan_anchor = point
+                    self.pan_start_offset = QPointF(self.pan_offset)
+                    self._update_cursor(True)
             return
 
         if self.current_mode not in {"draw", "mask"}:
@@ -270,6 +389,27 @@ class ImageCanvas(QWidget):
         self.preview_end = None
         self.update()
 
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        """선택된 라벨을 방향키로 1px, Shift+방향키로 10px 이동합니다."""
+        if self.current_mode != "edit" or self.selected_label_index is None:
+            super().keyPressEvent(event)
+            return
+
+        move_map = {
+            Qt.Key.Key_Left: (-1, 0),
+            Qt.Key.Key_Right: (1, 0),
+            Qt.Key.Key_Up: (0, -1),
+            Qt.Key.Key_Down: (0, 1),
+        }
+        direction = move_map.get(event.key())
+        if direction is None:
+            super().keyPressEvent(event)
+            return
+
+        step = 10 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+        self._move_selected_label_by_pixels(direction[0] * step, direction[1] * step)
+        event.accept()
+
     def target_rect(self) -> QRect:
         """현재 배율과 이동량을 반영한 실제 이미지 표시 영역을 반환합니다."""
         if self.image.isNull():
@@ -303,6 +443,34 @@ class ImageCanvas(QWidget):
         x_center = max(0.0, min(1.0, x1 + width / 2.0))
         y_center = max(0.0, min(1.0, y1 + height / 2.0))
         return x_center, y_center, width, height
+
+    def _constrain_edit_rect_to_target(self, rect: QRectF, keep_size: bool) -> QRectF:
+        """편집 중인 박스가 이미지 표시 영역 밖으로 나가지 않도록 보정합니다."""
+        target = QRectF(self.target_rect())
+        if target.isNull():
+            return rect
+
+        if keep_size:
+            constrained = QRectF(rect)
+            if constrained.width() > target.width():
+                constrained.setWidth(target.width())
+            if constrained.height() > target.height():
+                constrained.setHeight(target.height())
+            if constrained.left() < target.left():
+                constrained.moveLeft(target.left())
+            if constrained.right() > target.right():
+                constrained.moveRight(target.right())
+            if constrained.top() < target.top():
+                constrained.moveTop(target.top())
+            if constrained.bottom() > target.bottom():
+                constrained.moveBottom(target.bottom())
+            return constrained
+
+        left = min(max(rect.left(), target.left()), target.right())
+        right = min(max(rect.right(), target.left()), target.right())
+        top = min(max(rect.top(), target.top()), target.bottom())
+        bottom = min(max(rect.bottom(), target.top()), target.bottom())
+        return QRectF(QPointF(left, top), QPointF(right, bottom)).normalized()
 
     def _current_preview_rect(self) -> QRect | None:
         """현재 작업 중인 사각형 미리보기 영역을 계산합니다."""
@@ -354,7 +522,13 @@ class ImageCanvas(QWidget):
                 text_color = QColor("#ffffff")
                 outlined_text = True
             elif self.current_mode == "edit":
-                if self.erased_feedback_active:
+                if self.held_class_index is not None:
+                    # 클래스 키를 누른 상태에서는 기존 편집 대신 클래스 변경 상태를 커서에 표시합니다.
+                    color = QColor(CLASS_COLORS[self.held_class_index % len(CLASS_COLORS)])
+                    draw_circle = True
+                    text = "Class Change"
+                    text_color = QColor("#ff9f1c")
+                elif self.erased_feedback_active:
                     color = QColor("#ff9f1c")
                     draw_circle = True
                     text = "Erased"
@@ -427,7 +601,13 @@ class ImageCanvas(QWidget):
 
     def _handle_rects(self, rect: QRectF) -> dict[str, QRectF]:
         """사각형 네 꼭지점의 핸들 영역을 계산합니다."""
-        size = 6.0
+        # 확대 배율이 높을수록 포인트를 키워 클릭 판정과 표시 크기를 함께 넓힙니다.
+        if self.zoom_factor >= 3.0:
+            size = 12.0
+        elif self.zoom_factor >= 1.5:
+            size = 9.0
+        else:
+            size = 6.0
         half = size / 2.0
         return {
             "tl": QRectF(rect.left() - half, rect.top() - half, size, size),
@@ -441,6 +621,7 @@ class ImageCanvas(QWidget):
         self._update_hover_edit_target(point)
         if self.hover_edit_index is None:
             return False
+        self.set_selected_label_index(self.hover_edit_index)
         rect = self._normalized_to_widget_rect(
             self.labels[self.hover_edit_index].x_center,
             self.labels[self.hover_edit_index].y_center,
@@ -467,6 +648,7 @@ class ImageCanvas(QWidget):
             delta = point - self.start_point
             rect.translate(delta.x(), delta.y())
             self.start_point = QPoint(point)
+            rect = self._constrain_edit_rect_to_target(rect, keep_size=True)
         elif self.edit_mode_kind == "resize" and self.edit_anchor_name is not None:
             if self.edit_anchor_name == "tl":
                 rect.setTopLeft(QPointF(point))
@@ -477,6 +659,7 @@ class ImageCanvas(QWidget):
             elif self.edit_anchor_name == "br":
                 rect.setBottomRight(QPointF(point))
             rect = rect.normalized()
+            rect = self._constrain_edit_rect_to_target(rect, keep_size=False)
 
         x_center, y_center, width, height = self.widget_rect_to_normalized(rect.toRect())
         label = self.labels[self.edit_label_index]
@@ -515,20 +698,32 @@ class ImageCanvas(QWidget):
         self.start_point = None
 
     def _delete_label_at_point(self, point: QPoint) -> None:
-        """편집 모드에서 우클릭한 박스를 삭제하고 잠시 Erased 표시를 유지합니다."""
+        """편집 모드에서 우클릭한 박스의 삭제를 메인 창에 요청합니다."""
         self._update_hover_edit_target(point)
         if self.hover_edit_index is None:
             return
         delete_index = self.hover_edit_index
         if delete_index < 0 or delete_index >= len(self.labels):
             return
-        self.labels.pop(delete_index)
+        self.pending_delete_point = point
         self.label_deleted.emit(delete_index)
+
+    def confirm_label_deleted(self, delete_index: int) -> None:
+        """메인 창에서 확인된 라벨 삭제를 캔버스 상태에 반영합니다."""
+        if delete_index < 0 or delete_index >= len(self.labels):
+            return
+        self.labels.pop(delete_index)
         self.erased_feedback_active = True
         self.erased_feedback_timer.start(2000)
         self._clear_edit_state()
-        self.hover_point = point
+        self.set_selected_label_index(None)
+        self.hover_point = self.pending_delete_point
+        self.pending_delete_point = None
         self.update()
+
+    def cancel_label_delete(self) -> None:
+        """라벨 삭제 확인이 취소되면 임시 삭제 지점을 초기화합니다."""
+        self.pending_delete_point = None
 
     def _clear_erased_feedback(self) -> None:
         """Erased 안내 문구를 지우고 일반 편집 안내로 되돌립니다."""
@@ -553,10 +748,41 @@ class ImageCanvas(QWidget):
                     self.hover_edit_kind = "resize"
                     self.hover_handle_name = handle_name
                     return
-            if rect.contains(QPointF(point)):
+            hit_rect = QRectF(rect).adjusted(-3.0, -3.0, 3.0, 3.0)
+            if hit_rect.contains(QPointF(point)):
                 self.hover_edit_index = index
                 self.hover_edit_kind = "move"
                 return
+
+    def _move_selected_label_by_pixels(self, dx: int, dy: int) -> None:
+        """선택된 라벨을 화면 픽셀 단위로 이동하고 변경 내용을 알립니다."""
+        if self.selected_label_index is None or self.selected_label_index >= len(self.labels):
+            return
+
+        target = self.target_rect()
+        if target.isNull() or target.width() <= 0 or target.height() <= 0:
+            return
+
+        label = self.labels[self.selected_label_index]
+        x_delta = dx / target.width()
+        y_delta = dy / target.height()
+        half_width = min(0.5, label.width / 2.0)
+        half_height = min(0.5, label.height / 2.0)
+        new_x = min(max(label.x_center + x_delta, half_width), 1.0 - half_width)
+        new_y = min(max(label.y_center + y_delta, half_height), 1.0 - half_height)
+        if new_x == label.x_center and new_y == label.y_center:
+            return
+
+        label.x_center = new_x
+        label.y_center = new_y
+        self.label_edited.emit(
+            self.selected_label_index,
+            label.x_center,
+            label.y_center,
+            label.width,
+            label.height,
+        )
+        self.update()
 
     def _update_cursor(self, dragging: bool = False) -> None:
         """현재 모드와 줌 상태에 맞는 마우스 커서를 적용합니다."""

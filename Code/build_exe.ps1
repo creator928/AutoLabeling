@@ -10,20 +10,13 @@ if (Test-Path -LiteralPath $distDir) {
     Remove-Item -LiteralPath $distDir -Recurse -Force
 }
 
+# spec 파일에는 main.py 상대경로를 유지해 다른 PC/폴더에서도 빌드되도록 합니다.
 python -m PyInstaller `
   --noconfirm `
   --clean `
-  --onefile `
-  --windowed `
-  --exclude-module qt_material `
-  --add-data "training_runner.py;." `
-  --add-data "auto_label_runner.py;." `
-  --add-data "validation_runner.py;." `
-  --name AutoLabeler `
   --distpath $distDir `
   --workpath $workDir `
-  --specpath . `
-  main.py
+  AutoLabeler.spec
 
 # 기존 EXE를 먼저 삭제하지 않고 직접 덮어써 교체 실패 시 기존 실행 파일을 보존합니다.
 $copySucceeded = $false

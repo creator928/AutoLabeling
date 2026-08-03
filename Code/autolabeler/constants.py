@@ -7,6 +7,9 @@ from .models import ModelOption
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
+# 빌드/배포본을 화면에서 식별하기 위한 표시 버전입니다.
+APP_VERSION = "ver.26.0721.1746"
+
 # 클래스 인덱스별 기본 표시 색상입니다.
 CLASS_COLORS = [
     "#00FF00",
@@ -17,6 +20,8 @@ CLASS_COLORS = [
     "#FFFF00",
     "#FFFFFF",
     "#000000",
+    "#FF8800",
+    "#00A86B",
 ]
 
 DEFAULT_SHORTCUTS = {
@@ -29,8 +34,27 @@ DEFAULT_SHORTCUTS = {
     "reset_view": "S",
     "delete_last_box": "R",
     "delete_current_pair": "Delete",
+    "review_current_image": "Z",
+    "find_unreviewed_image": "F",
     "toggle_theme": "T",
     "open_settings": "Ctrl+,",
+}
+
+# 설정 창과 좌측 안내 리스트에서 기능 단축키를 사람이 읽기 쉬운 이름으로 표시합니다.
+SHORTCUT_LABELS = {
+    "draw_box": "박스 그리기",
+    "mask_area": "마스킹",
+    "edit_box": "편집",
+    "cancel_mode": "작업 취소",
+    "prev_image": "이전 이미지",
+    "next_image": "다음 이미지",
+    "reset_view": "화면 맞춤/빠른 확대",
+    "delete_last_box": "선택/최근 라벨 삭제",
+    "delete_current_pair": "이미지+라벨 파일 삭제",
+    "review_current_image": "검토 완료/빈 이미지",
+    "find_unreviewed_image": "미작업 찾기",
+    "toggle_theme": "테마 전환",
+    "open_settings": "설정 열기",
 }
 
 DEFAULT_CLASS_SHORTCUTS = {
@@ -44,6 +68,7 @@ DEFAULT_CLASS_SHORTCUTS = {
     "7": "7",
     "8": "8",
     "9": "9",
+    "10": "0",
 }
 
 DEFAULT_CONFIG = {

@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 
 from ..services.process_service import build_clean_python_env, clean_windows_dll_search_path
 
-from ..constants import CLASS_COLORS
+from ..constants import CLASS_COLORS, SHORTCUT_LABELS
 from ..models import AppConfig, ModelOption
 
 
@@ -133,7 +133,7 @@ class SettingsDialog(QDialog):
             row_widget = QWidget(self.shortcut_list)
             row_layout = QHBoxLayout(row_widget)
             row_layout.setContentsMargins(8, 4, 8, 4)
-            row_layout.addWidget(QLabel(action_name))
+            row_layout.addWidget(QLabel(SHORTCUT_LABELS.get(action_name, action_name)))
             editor = QKeySequenceEdit(QKeySequence(key_value), row_widget)
             self.shortcut_editors[action_name] = editor
             row_layout.addWidget(editor)
